@@ -1,0 +1,94 @@
+name: "Create builder"
+on:
+  workflow_dispatch
+
+env:
+  HOST_OS: "ubuntu22"
+
+jobs:
+  create-builder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+            path: ./builder
+
+      - name: "Checkout iRODS source"
+        uses: actions/checkout@v4
+        with:
+            repository: irods/irods
+            submodules: true
+            path: ./src/irods
+    
+      - name: "Checkout icommands source"
+        uses: actions/checkout@v4
+        with:
+            repository: irods/irods_client_icommands
+            path: ./src/icommands
+    
+      - name: "Make output mount points"
+        run: |
+          mkdir -p ./output/irods
+          mkdir -p ./output/icommands
+          mkdir -p ./output/packages
+
+      - name: "Create builder image"
+        env:
+            DOCKER_BUILDKIT: 1
+        run: >
+          cd ./builder 
+
+          docker build --load
+          --tag irods-core-builder-${{ env.HOST_OS }}
+          --file irods_core_builder.${{ env.HOST_OS }}.Dockerfile .
+
+      - name: "Login to ghcr.io"
+        uses: docker/login-action@v2
+        with:
+            registry: ghcr.io
+            username: ${{ github.repository_owner }}
+            password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Cache compiler artefacts"
+        uses: actions/cache@v3
+        with:
+          path: ${{ github.workspace }}/output/ccache
+          key: ${{ runner.os }}-ccache
+
+      - name: "Build packages"
+        run: >
+          docker run --rm 
+          -v ${GITHUB_WORKSPACE}/src/irods:/irods_source:ro
+          -v ${GITHUB_WORKSPACE}/output/irods:/irods_build
+          -v ${GITHUB_WORKSPACE}/output/ccache:/irods_build_cache
+          -v ${GITHUB_WORKSPACE}/src/icommands:/icommands_source:ro
+          -v ${GITHUB_WORKSPACE}/output/icommands:/icommands_build
+          -v ${GITHUB_WORKSPACE}/output/packages:/irods_packages
+          irods-core-builder-${{ env.HOST_OS }}
+          --irods-repo-branch 4-3-stable
+          --icommands-repo-branch 4-3-stable
+          --exclude-unit-tests
+          --exclude-microservice-tests
+          --ccache
+          -j $(nproc)
+
+          ls -l ${GITHUB_WORKSPACE}/output/packages
+      
+      # - name: "Upload packages"
+      #   uses: actions/upload-artifact@v3
+      #   with:
+      #     name: irods-nightly-build-packages
+      #     path: ${{ github.workspace }}/"output/packages/*.deb"
+
+      - name: "Create Release"
+        uses: ncipollo/release-action@v1
+        with:
+          name: "nightly"
+          tag: "nightly"
+          commit: "feature/builder"
+          prerelease: true
+          artifacts: ${{ github.workspace }}/"output/packages/*.deb"
+          removeArtifacts: true
+          artifactErrorsFailBuild: true
+          generateReleaseNotes: true
